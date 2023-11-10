@@ -32,7 +32,7 @@ type BrowserScreen struct {
 	currentPath    []string
 	currentType    int
 	message        string
-	filter         string
+	filter         Filter
 	mode           BrowserMode
 	inputModal     *termboxUtil.InputModal
 	confirmModal   *termboxUtil.ConfirmModal
@@ -42,6 +42,18 @@ type BrowserScreen struct {
 	leftPaneBuffer  []Line
 	rightPaneBuffer []Line
 }
+
+type Filter struct {
+	filterType FilterType
+	filterMap  map[int]string
+}
+
+type FilterType int
+
+const (
+	FilterTypeChild FilterType = iota
+	FilterTypeSibling
+)
 
 /*
 BrowserMode is just for designating the mode that we're in
@@ -160,7 +172,12 @@ func (screen *BrowserScreen) handleBrowseKeyEvent(event termbox.Event) int {
 			screen.startEditItem()
 		}
 	} else if event.Ch == '/' {
-		screen.startFilter()
+		screen.filter.filterType = FilterTypeChild
+		screen.startChildFilter()
+
+	} else if event.Ch == '|' {
+		screen.filter.filterType = FilterTypeSibling
+		screen.startSiblingFilter()
 
 	} else if event.Ch == 'r' {
 		screen.startRenameItem()
@@ -217,6 +234,15 @@ func (screen *BrowserScreen) handleBrowseKeyEvent(event termbox.Event) int {
 	return BrowserScreenIndex
 }
 
+func (screen *BrowserScreen) getFilterIndex() int {
+	if screen.filter.filterType == FilterTypeChild {
+		return len(screen.currentPath)
+	} else if screen.filter.filterType == FilterTypeSibling {
+		return len(screen.currentPath) - 1
+	}
+	return 0
+}
+
 func (screen *BrowserScreen) handleInputKeyEvent(event termbox.Event) int {
 	if event.Key == termbox.KeyEsc {
 		screen.mode = modeBrowse
@@ -226,7 +252,11 @@ func (screen *BrowserScreen) handleInputKeyEvent(event termbox.Event) int {
 		if screen.inputModal.IsDone() {
 			b, p, _ := screen.db.getGenericFromPath(screen.currentPath)
 			if screen.mode == modeFilter {
-				screen.filter = screen.inputModal.GetValue()
+				idx := screen.getFilterIndex()
+				if screen.filter.filterMap == nil {
+					screen.filter.filterMap = make(map[int]string)
+				}
+				screen.filter.filterMap[idx] = screen.inputModal.GetValue()
 				if !screen.db.isVisiblePath(screen.currentPath, screen.filter) {
 					screen.currentPath = screen.currentPath[:len(screen.currentPath)-1]
 				}
@@ -424,7 +454,7 @@ func (screen *BrowserScreen) handleIOKeyEvent(event termbox.Event) int {
 
 func (screen *BrowserScreen) jumpCursorUp(distance int) bool {
 	// Jump up 'distance' lines
-	visPaths, err := screen.db.buildVisiblePathSlice(screen.filter)
+	visPaths, err := screen.db.buildVisiblePathSlice(screen.currentPath, screen.filter)
 	if err == nil {
 		findPath := screen.currentPath
 		for idx, pth := range visPaths {
@@ -456,7 +486,7 @@ func (screen *BrowserScreen) jumpCursorUp(distance int) bool {
 	return true
 }
 func (screen *BrowserScreen) jumpCursorDown(distance int) bool {
-	visPaths, err := screen.db.buildVisiblePathSlice(screen.filter)
+	visPaths, err := screen.db.buildVisiblePathSlice(screen.currentPath, screen.filter)
 	if err == nil {
 		findPath := screen.currentPath
 		for idx, pth := range visPaths {
@@ -574,11 +604,13 @@ func (screen *BrowserScreen) drawFooter(style Style) {
 
 func (screen *BrowserScreen) buildLeftPane(style Style) {
 	screen.leftPaneBuffer = nil
+
+	level := len(screen.currentPath)
 	if len(screen.currentPath) == 0 {
 		screen.currentPath = screen.db.getNextVisiblePath(nil, screen.filter)
 	}
 	for i := range screen.db.buckets {
-		screen.leftPaneBuffer = append(screen.leftPaneBuffer, screen.bucketToLines(&screen.db.buckets[i], style)...)
+		screen.leftPaneBuffer = append(screen.leftPaneBuffer, screen.bucketToLines(&screen.db.buckets[i], style, level)...)
 	}
 	// Find the cursor in the leftPane
 	for k, v := range screen.leftPaneBuffer {
@@ -702,7 +734,7 @@ func formatValueJSON(val []byte) ([]byte, error) {
 	return out, nil
 }
 
-func (screen *BrowserScreen) bucketToLines(bkt *BoltBucket, style Style) []Line {
+func (screen *BrowserScreen) bucketToLines(bkt *BoltBucket, style Style, level int) []Line {
 	var ret []Line
 	bfg, bbg := style.defaultFg, style.defaultBg
 	if comparePaths(screen.currentPath, bkt.GetPath()) {
@@ -710,12 +742,13 @@ func (screen *BrowserScreen) bucketToLines(bkt *BoltBucket, style Style) []Line 
 	}
 	bktPrefix := strings.Repeat(" ", len(bkt.GetPath())*2)
 	if bkt.expanded {
+
 		ret = append(ret, Line{bktPrefix + "- " + stringify([]byte(bkt.name)), bfg, bbg})
 		for i := range bkt.buckets {
-			ret = append(ret, screen.bucketToLines(&bkt.buckets[i], style)...)
+			ret = append(ret, screen.bucketToLines(&bkt.buckets[i], style, level)...)
 		}
 		for _, bp := range bkt.pairs {
-			if screen.filter != "" && !strings.Contains(bp.key, screen.filter) {
+			if screen.filter.filterMap != nil && !strings.Contains(bp.key, screen.filter.filterMap[len(screen.currentPath)]) {
 				continue
 			}
 			pfg, pbg := style.defaultFg, style.defaultBg
@@ -758,7 +791,7 @@ func (screen *BrowserScreen) startDeleteItem() bool {
 	return false
 }
 
-func (screen *BrowserScreen) startFilter() bool {
+func (screen *BrowserScreen) startChildFilter() bool {
 	_, _, e := screen.db.getGenericFromPath(screen.currentPath)
 	if e == nil {
 		w, h := termbox.Size()
@@ -766,10 +799,34 @@ func (screen *BrowserScreen) startFilter() bool {
 		inpX, inpY := ((w / 2) - (inpW / 2)), ((h / 2) - inpH)
 		mod := termboxUtil.CreateInputModal("", inpX, inpY, inpW, inpH, termbox.ColorWhite, termbox.ColorBlack)
 		mod.SetTitle(termboxUtil.AlignText("Filter", inpW, termboxUtil.AlignCenter))
-		mod.SetValue(screen.filter)
+		mod.SetValue(screen.getCurrentIndexFilterValue())
 		mod.Show()
 		screen.inputModal = mod
 		screen.mode = modeFilter
+		screen.filter.filterType = FilterTypeChild
+		return true
+	}
+	return false
+}
+
+func (screen *BrowserScreen) getCurrentIndexFilterValue() string {
+	idx := len(screen.currentPath)
+	return screen.filter.filterMap[idx]
+}
+
+func (screen *BrowserScreen) startSiblingFilter() bool {
+	_, _, e := screen.db.getGenericFromPath(screen.currentPath)
+	if e == nil {
+		w, h := termbox.Size()
+		inpW, inpH := (w / 2), 6
+		inpX, inpY := ((w / 2) - (inpW / 2)), ((h / 2) - inpH)
+		mod := termboxUtil.CreateInputModal("", inpX, inpY, inpW, inpH, termbox.ColorWhite, termbox.ColorBlack)
+		mod.SetTitle(termboxUtil.AlignText("Filter", inpW, termboxUtil.AlignCenter))
+		mod.SetValue(screen.getCurrentIndexFilterValue())
+		mod.Show()
+		screen.inputModal = mod
+		screen.mode = modeFilter
+		screen.filter.filterType = FilterTypeSibling
 		return true
 	}
 	return false

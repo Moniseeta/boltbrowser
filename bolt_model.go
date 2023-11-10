@@ -124,12 +124,12 @@ func (bd *BoltDB) getVisibleItemCount(path []string) (int, error) {
 	return vis, retErr
 }
 
-func (bd *BoltDB) buildVisiblePathSlice(filter string) ([][]string, error) {
+func (bd *BoltDB) buildVisiblePathSlice(path []string, filter Filter) ([][]string, error) {
 	var retSlice [][]string
 	var retErr error
 	// The root path, recurse for root buckets
 	for i := range bd.buckets {
-		bktS, bktErr := bd.buckets[i].buildVisiblePathSlice([]string{}, filter)
+		bktS, bktErr := bd.buckets[i].buildVisiblePathSlice(path, []string{}, filter)
 		if bktErr == nil {
 			retSlice = append(retSlice, bktS...)
 		} else {
@@ -140,8 +140,8 @@ func (bd *BoltDB) buildVisiblePathSlice(filter string) ([][]string, error) {
 	return retSlice, retErr
 }
 
-func (bd *BoltDB) isVisiblePath(path []string, filter string) bool {
-	visPaths, err := bd.buildVisiblePathSlice(filter)
+func (bd *BoltDB) isVisiblePath(path []string, filter Filter) bool {
+	visPaths, err := bd.buildVisiblePathSlice(path, filter)
 	if err != nil {
 		return false
 	}
@@ -162,8 +162,8 @@ func (bd *BoltDB) isVisiblePath(path []string, filter string) bool {
 	}
 	return false
 }
-func (bd *BoltDB) getPrevVisiblePath(path []string, filter string) []string {
-	visPaths, err := bd.buildVisiblePathSlice(filter)
+func (bd *BoltDB) getPrevVisiblePath(path []string, filter Filter) []string {
+	visPaths, err := bd.buildVisiblePathSlice(path, filter)
 	if path == nil {
 		if len(visPaths) > 0 {
 			return visPaths[len(visPaths)-1]
@@ -186,8 +186,8 @@ func (bd *BoltDB) getPrevVisiblePath(path []string, filter string) []string {
 	}
 	return nil
 }
-func (bd *BoltDB) getNextVisiblePath(path []string, filter string) []string {
-	visPaths, err := bd.buildVisiblePathSlice(filter)
+func (bd *BoltDB) getNextVisiblePath(path []string, filter Filter) []string {
+	visPaths, err := bd.buildVisiblePathSlice(path, filter)
 	if path == nil {
 		if len(visPaths) > 0 {
 			return visPaths[0]
@@ -310,14 +310,14 @@ func (b *BoltBucket) GetPath() []string {
 buildVisiblePathSlice builds a slice of string slices containing all visible paths in this bucket
 The passed prefix is the path leading to the current bucket
 */
-func (b *BoltBucket) buildVisiblePathSlice(prefix []string, filter string) ([][]string, error) {
+func (b *BoltBucket) buildVisiblePathSlice(path []string, prefix []string, filter Filter) ([][]string, error) {
 	var retSlice [][]string
 	var retErr error
 	retSlice = append(retSlice, append(prefix, b.name))
 	if b.expanded {
 		// Add subbuckets
 		for i := range b.buckets {
-			bktS, bktErr := b.buckets[i].buildVisiblePathSlice(append(prefix, b.name), filter)
+			bktS, bktErr := b.buckets[i].buildVisiblePathSlice(path, append(prefix, b.name), filter)
 			if bktErr != nil {
 				return retSlice, bktErr
 			}
@@ -325,7 +325,7 @@ func (b *BoltBucket) buildVisiblePathSlice(prefix []string, filter string) ([][]
 		}
 		// Add pairs
 		for i := range b.pairs {
-			if filter != "" && !strings.Contains(b.pairs[i].key, filter) {
+			if filter.filterMap != nil && !strings.Contains(b.pairs[i].key, filter.filterMap[len(path)]) {
 				continue
 			}
 			retSlice = append(retSlice, append(append(prefix, b.name), b.pairs[i].key))
